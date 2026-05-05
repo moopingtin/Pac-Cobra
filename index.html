@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Cobra Pac-Man</title>
+<style>
+  body { background: #000; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; font-family: monospace; }
+  canvas { display: block; }
+  #msg { color: #ff0; font-size: 14px; margin-top: 8px; letter-spacing: 2px; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="msg">ARROW KEYS or WASD to move</div>
+<script>
+// ─── CONSTANTS ───────────────────────────────────────────────────────────────
+const T = { WALL:0, DOT:1, POWER:2, EMPTY:3, GHOST_HOUSE:4, TUNNEL:5, GHOST_DOOR:6 };
+const COLS = 28, ROWS = 31, TILE = 20;
+const STATE = { READY:0, PLAYING:1, DEAD:2, WIN:3, GAME_OVER:4 };
+const GS = { HOUSE:0, CHASE:1, SCATTER:2, FRIGHTENED:3, EATEN:4 };
+const MOVE_INTERVAL = 150; // ms per tick
+const FRIGHTEN_DURATION = 7000;
+const FLASH_START = 2000;
+const GHOST_HOUSE_ENTRY = { x: 13, y: 11 }; // tile above door
+const GHOST_RESPAWN = { x: 13, y: 14 };
+
+// ─── MAZE TEMPLATE (28×31) ───────────────────────────────────────────────────
+// 0=wall 1=dot 2=power 3=empty 4=ghost_house 5=tunnel 6=ghost_door
+const MAZE_TEMPLATE = [
+  [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+  [0,1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,1,1,1,1,1,1,1,1,1,1,0],
+  [0,1,0,0,0,0,1,0,0,0,0,0,1,0,0,1,0,0,0,0,0,1,0,0,0,0,1,0],
+  [0,2,0,0,0,0,1,0,0,0,0,0,1,0,0,1,0,0,0,0,0,1,0,0,0,0,2,0],
+  [0,1,0,0,0,0,1,0,0,0,0,0,1,0,0,1,0,0,0,0,0,1,0,0,0,0,1,0],
+  [0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0],
+  [0,1,0,0,0,0,1,0,0,1,0,0,0,0,0,0,0,0,1,0,0,1,0,0,0,0,1,0],
+  [0,1,0,0,0,0,1,0,0,1,0,0,0,0,0,0,0,0,1,0,0,1,0,0,0,0,1,0],
+  [0,1,1,1,1,1,1,0,0,1,1,1,1,0,0,1,1,1,1,0,0,1,1,1,1,1,1,0],
+  [0,0,0,0,0,0,1,0,0,0,0,0,3,0,0,3,0,0,0,0,0,1,0,0,0,0,0,0],
+  [0,0,0,0,0,0,1,0,0,0,0,0,3,0,0,3,0,0,0,0,0,1,0,0,0,0,0,0],
+  [0,0,0,0,0,0,1,0,0,3,3,3,3,4,4,4,3,3,3,3,0,1,0,0,0,0,0,0],
+  [0,0,0,0,0,0,1,0,0,3,0,0,0,4,4,4,0,0,0,3,0,1,0,0,0,0,0,0],
+  [0,0,0,0,0,0,1,0,0,3,0,4,4,4,4,4,4,4,0,3,0,1,0,0,0,0,0,0],
+  [5,3,3,3,3,3,1,3,3,3,0,4,4,3,3,3,4,4,0,3,3,3,1,3,3,3,3,5],
+  [0,0,0,0,0,0,1,0,0,3,0,4,4,4,4,4,4,4,0,3,0,1,0,0,0,0,0,0],
+  [0,0,0,0,0,0,1,0,0,3,0,0,0,0,0,0,0,0,0,3,0,1,0,0,0,0,0,0],
+  [0,0,0,0,0,0,1,0,0,3,3,3,3,3,3,3,3,3,3,3,0,1,0,0,0,0,0,0],
+  [0,0,0,0,0,0,1,0,0,3,0,0,0,0,0,0,0,0,0,3,0,1,0,0,0,0,0,0],
+  [0,0,0,0,0,0,1,0,0,3,0,0,0,0,0,0,0,0,0,3,0,1,0,0,0,0,0,0],
+  [0,1,1,1,1,1,1,1,1,1,1,1,1,0,0,1,1,1,1,1,1,1,1,1,1,1,1,0],
+  [0,1,0,0,0,0,1,0,0,0,0,0,1,0,0,1,0,0,0,0,0,1,0,0,0,0,1,0],
+  [0,1,0,0,0,0,1,0,0,0,0,0,1,0,0,1,0,0,0,0,0,1,0,0,0,0,1,0],
+  [0,2,1,1,0,0,1,1,1,1,1,1,1,3,3,1,1,1,1,1,1,1,0,0,1,1,2,0],
+  [0,0,0,1,0,0,1,0,0,1,0,0,0,0,0,0,0,0,1,0,0,1,0,0,1,0,0,0],
+  [0,0,0,1,0,0,1,0,0,1,0,0,0,0,0,0,0,0,1,0,0,1,0,0,1,0,0,0],
+  [0,1,1,1,1,1,1,0,0,1,1,1,1,0,0,1,1,1,1,0,0,1,1,1,1,1,1,0],
+  [0,1,0,0,0,0,0,0,0,0,0,0,1,0,0,1,0,0,0,0,0,0,0,0,0,0,1,0],
+  [0,1,0,0,0,0,0,0,0,0,0,0,1,0,0,1,0,0,0,0,0,0,0,0,0,0,1,0],
+  [0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0],
+  [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+];
+
+// ─── CANVAS SETUP ────────────────────────────────────────────────────────────
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+canvas.width  = COLS * TILE;
+canvas.height = ROWS * TILE + 50; // +50 for HUD
+
+// ─── GAME STATE ──────────────────────────────────────────────────────────────
+let maze, dotsRemaining, score, lives, level, gameState;
+let lastMoveTime = 0, lastFrameTime = 0;
+let readyTimer = 0;
+let globalGhostTimer = 0;
+let scatterMode = true; // starts in scatter
+let ghostEatCombo = 0;
+let tongueVisible = true, tongueTimer = 0;
+
+const SCATTER_TIMES = [7000, 20000, 7000, 20000, 5000]; // alternating scatter/chase
+let scatterPhase = 0;
+
+// ─── SNAKE ───────────────────────────────────────────────────────────────────
+let snake;
+function resetSnake() {
+  snake = {
+    body: [{x:13,y:23},{x:12,y:23},{x:11,y:23}],
+    dir: {x:1,y:0},
+    dirQueue: [],
+    growing: 0,
+  };
+}
+
+// ─── GHOSTS ──────────────────────────────────────────────────────────────────
+let ghosts;
+function makeGhost(name, sx, sy, color, scatterTgt, exitDelay) {
+  return { name, x:sx, y:sy, startX:sx, startY:sy, color,
+           scatterTgt, state:GS.HOUSE, dir:{x:1,y:0},
+           renderX:sx*TILE, renderY:sy*TILE,
+           frightenedTimer:0, exitDelay, exitTimer:0 };
+}
+function resetGhosts() {
+  ghosts = [
+    makeGhost('blinky',13,11,'#FF0000',{x:25,y:0},0),
+    makeGhost('pinky', 13,14,'#FFB8FF',{x:2, y:0},2000),
+    makeGhost('inky',  11,14,'#00FFFF',{x:27,y:29},4000),
+    makeGhost('clyde', 15,14,'#FFB852',{x:0, y:29},6000),
+  ];
+}
+
+// ─── INIT ─────────────────────────────────────────────────────────────────────
+function initGame() {
+  maze = MAZE_TEMPLATE.map(r => [...r]);
+  dotsRemaining = 0;
+  maze.forEach(r => r.forEach(t => { if(t===T.DOT||t===T.POWER) dotsRemaining++; }));
+  score = 0; lives = 3; level = 1;
+  resetSnake();
+  resetGhosts();
+  gameState = STATE.READY;
+  readyTimer = 2000;
+  scatterPhase = 0; scatterMode = true;
+  globalGhostTimer = 0;
+  ghostEatCombo = 0;
+}
+
+// ─── HELPERS ─────────────────────────────────────────────────────────────────
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r, y);
+  ctx.lineTo(x+w-r, y);
+  ctx.arcTo(x+w, y, x+w, y+r, r);
+  ctx.lineTo(x+w, y+h-r);
+  ctx.arcTo(x+w, y+h, x+w-r, y+h, r);
+  ctx.lineTo(x+r, y+h);
+  ctx.arcTo(x, y+h, x, y+h-r, r);
+  ctx.lineTo(x, y+r);
+  ctx.arcTo(x, y, x+r, y, r);
+  ctx.closePath();
+}
+
+function tileWalkable(x, y, forGhost, ghostState) {
+  if (x < 0 || x >= COLS || y < 0 || y >= ROWS) return false;
+  const t = maze[y][x];
+  if (t === T.WALL) return false;
+  if (!forGhost && t === T.GHOST_HOUSE) return false;
+  if (!forGhost && t === T.GHOST_DOOR) return false;
+  if (forGhost && (t === T.GHOST_HOUSE || t === T.GHOST_DOOR)) {
+    return ghostState === GS.HOUSE || ghostState === GS.EATEN;
+  }
+  return true;
+}
+
+function wrapX(x) {
+  if (x < 0) return COLS - 1;
+  if (x >= COLS) return 0;
+  return x;
+}
+
+// ─── BFS ─────────────────────────────────────────────────────────────────────
+const DIRS4 = [{x:0,y:-1},{x:1,y:0},{x:0,y:1},{x:-1,y:0}];
+
+function bfsNextDir(ghost, tx, ty) {
+  const sx = ghost.x, sy = ghost.y;
+  if (sx === tx && sy === ty) return ghost.dir;
+  const visited = new Uint8Array(COLS * ROWS);
+  visited[sy * COLS + sx] = 1;
+  const queue = [];
+  for (const d of DIRS4) {
+    if (d.x === -ghost.dir.x && d.y === -ghost.dir.y) continue;
+    let nx = wrapX(sx + d.x), ny = sy + d.y;
+    if (!tileWalkable(nx, ny, true, ghost.state)) continue;
+    const k = ny * COLS + nx;
+    if (!visited[k]) { visited[k] = 1; queue.push({x:nx, y:ny, fd:d}); }
+  }
+  let head = 0;
+  while (head < queue.length) {
+    const {x,y,fd} = queue[head++];
+    if (x === tx && y === ty) return fd;
+    for (const d of DIRS4) {
+      let nx = wrapX(x + d.x), ny = y + d.y;
+      if (!tileWalkable(nx, ny, true, ghost.state)) continue;
+      const k = ny * COLS + nx;
+      if (!visited[k]) { visited[k] = 1; queue.push({x:nx, y:ny, fd}); }
+    }
+  }
+  // fallback
+  for (const d of DIRS4) {
+    if (d.x === -ghost.dir.x && d.y === -ghost.dir.y) continue;
+    const nx = wrapX(sx + d.x), ny = sy + d.y;
+    if (tileWalkable(nx, ny, true, ghost.state)) return d;
+  }
+  return ghost.dir;
+}
+
+function frightenedDir(ghost) {
+  const legal = DIRS4.filter(d => {
+    if (d.x === -ghost.dir.x && d.y === -ghost.dir.y) return false;
+    return tileWalkable(wrapX(ghost.x + d.x), ghost.y + d.y, true, ghost.state);
+  });
+  return legal.length ? legal[Math.floor(Math.random()*legal.length)] : ghost.dir;
+}
+
+// ─── GHOST TARGET ────────────────────────────────────────────────────────────
+function ghostTarget(ghost) {
+  const head = snake.body[0];
+  const dir  = snake.dir;
+  if (scatterMode) return ghost.scatterTgt;
+  switch(ghost.name) {
+    case 'blinky': return head;
+    case 'pinky':  return {x: head.x + dir.x*4, y: head.y + dir.y*4};
+    case 'inky': {
+      const blinky = ghosts[0];
+      const ref = {x: head.x + dir.x*2, y: head.y + dir.y*2};
+      return {x: ref.x*2 - blinky.x, y: ref.y*2 - blinky.y};
+    }
+    case 'clyde': {
+      const dx = ghost.x - head.x, dy = ghost.y - head.y;
+      return (dx*dx + dy*dy) > 64 ? head : ghost.scatterTgt;
+    }
+  }
+}
+
+// ─── GHOST MOVE ──────────────────────────────────────────────────────────────
+function moveGhost(ghost, dt) {
+  if (ghost.state === GS.HOUSE) {
+    ghost.exitTimer += dt;
+    if (ghost.exitTimer >= ghost.exitDelay) {
+      ghost.state = GS.CHASE;
+      ghost.x = GHOST_HOUSE_ENTRY.x;
+      ghost.y = GHOST_HOUSE_ENTRY.y;
+    }
+    return;
+  }
+  if (ghost.state === GS.FRIGHTENED) {
+    ghost.frightenedTimer -= dt;
+    if (ghost.frightenedTimer <= 0) ghost.state = GS.CHASE;
+  }
+
+  let d;
+  if (ghost.state === GS.FRIGHTENED) {
+    d = frightenedDir(ghost);
+  } else if (ghost.state === GS.EATEN) {
+    d = bfsNextDir(ghost, GHOST_RESPAWN.x, GHOST_RESPAWN.y);
+    if (ghost.x === GHOST_RESPAWN.x && ghost.y === GHOST_RESPAWN.y) {
+      ghost.state = GS.HOUSE;
+      ghost.exitTimer = ghost.exitDelay * 0.5;
+      return;
+    }
+  } else {
+    const tgt = ghostTarget(ghost);
+    d = bfsNextDir(ghost, Math.max(0,Math.min(COLS-1,tgt.x)), Math.max(0,Math.min(ROWS-1,tgt.y)));
+  }
+  ghost.dir = d;
+  ghost.x = wrapX(ghost.x + d.x);
+  ghost.y = ghost.y + d.y;
+  ghost.y = Math.max(0, Math.min(ROWS-1, ghost.y));
+}
+
+// ─── SNAKE MOVE ──────────────────────────────────────────────────────────────
+function moveSnake() {
+  // apply queued direction
+  while (snake.dirQueue.length > 0) {
+    const cand = snake.dirQueue.shift();
+    if (cand.x === -snake.dir.x && cand.y === -snake.dir.y) continue; // no 180°
+    const tx = wrapX(snake.body[0].x + cand.x);
+    const ty = snake.body[0].y + cand.y;
+    if (ty < 0 || ty >= ROWS || !tileWalkable(tx, ty, false, null)) continue; // wall — discard turn
+    snake.dir = cand; break;
+  }
+
+  const nx = wrapX(snake.body[0].x + snake.dir.x);
+  const ny = snake.body[0].y + snake.dir.y;
+
+  // wall — just stop, don't die
+  if (ny < 0 || ny >= ROWS || !tileWalkable(nx, ny, false, null)) return;
+
+  // self-collision (exclude tail tip if not growing)
+  const limit = snake.growing > 0 ? snake.body.length : snake.body.length - 1;
+  for (let i = 0; i < limit; i++) {
+    if (snake.body[i].x === nx && snake.body[i].y === ny) { loseLife(); return; }
+  }
+
+  snake.body.unshift({x:nx, y:ny});
+  if (snake.growing > 0) { snake.growing--; } else { snake.body.pop(); }
+
+  // pickup
+  const tile = maze[ny][nx];
+  if (tile === T.DOT) {
+    maze[ny][nx] = T.EMPTY; score += 10; snake.growing++; dotsRemaining--;
+    if (dotsRemaining === 0) { gameState = STATE.WIN; return; }
+  } else if (tile === T.POWER) {
+    maze[ny][nx] = T.EMPTY; score += 50; snake.growing++; dotsRemaining--;
+    ghostEatCombo = 0;
+    for (const g of ghosts) {
+      if (g.state !== GS.HOUSE && g.state !== GS.EATEN) {
+        g.state = GS.FRIGHTENED;
+        g.frightenedTimer = FRIGHTEN_DURATION;
+      }
+    }
+    if (dotsRemaining === 0) { gameState = STATE.WIN; return; }
+  }
+
+  // ghost collision after snake moves
+  checkGhostCollision();
+}
+
+function checkGhostCollision() {
+  const head = snake.body[0];
+  for (const g of ghosts) {
+    if (g.x === head.x && g.y === head.y) {
+      if (g.state === GS.FRIGHTENED) {
+        g.state = GS.EATEN;
+        ghostEatCombo++;
+        score += 200 * Math.pow(2, ghostEatCombo - 1);
+      } else if (g.state === GS.CHASE || g.state === GS.SCATTER) {
+        loseLife(); return;
+      }
+    }
+  }
+}
+
+// ─── LIFE MANAGEMENT ─────────────────────────────────────────────────────────
+function loseLife() {
+  lives--;
+  if (lives <= 0) { gameState = STATE.GAME_OVER; return; }
+  gameState = STATE.DEAD;
+  readyTimer = 1500;
+  resetSnake();
+  resetGhosts();
+}
+
+// ─── GAME TICK ───────────────────────────────────────────────────────────────
+function gameTick(dt) {
+  // update scatter/chase cycle
+  globalGhostTimer += dt;
+  if (scatterPhase < SCATTER_TIMES.length) {
+    if (globalGhostTimer >= SCATTER_TIMES[scatterPhase]) {
+      globalGhostTimer = 0;
+      scatterPhase++;
+      const newScatter = scatterPhase % 2 === 0;
+      if (newScatter !== scatterMode) {
+        scatterMode = newScatter;
+        for (const g of ghosts) {
+          if (g.state === GS.CHASE || g.state === GS.SCATTER) {
+            g.dir = {x:-g.dir.x, y:-g.dir.y};
+            g.state = scatterMode ? GS.SCATTER : GS.CHASE;
+          }
+        }
+      }
+    }
+  }
+
+  // tongue flicker
+  tongueTimer += dt;
+  if (tongueTimer > 400) { tongueTimer = 0; tongueVisible = !tongueVisible; }
+
+  moveSnake();
+  if (gameState !== STATE.PLAYING) return;
+  for (const g of ghosts) moveGhost(g, dt);
+  checkGhostCollision();
+}
+
+// ─── RENDERING ───────────────────────────────────────────────────────────────
+function drawMaze() {
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const t = maze[r][c];
+      const px = c * TILE, py = r * TILE;
+      if (t === T.WALL) {
+        ctx.fillStyle = '#1a1aff';
+        ctx.fillRect(px+1, py+1, TILE-2, TILE-2);
+        ctx.strokeStyle = '#0000aa';
+        ctx.strokeRect(px+1, py+1, TILE-2, TILE-2);
+      } else if (t === T.DOT) {
+        ctx.fillStyle = '#ffddaa';
+        ctx.beginPath();
+        ctx.arc(px+TILE/2, py+TILE/2, 2, 0, Math.PI*2);
+        ctx.fill();
+      } else if (t === T.POWER) {
+        const pulse = 3.5 + 1.5 * Math.sin(lastFrameTime / 300);
+        ctx.fillStyle = '#ffddaa';
+        ctx.beginPath();
+        ctx.arc(px+TILE/2, py+TILE/2, pulse, 0, Math.PI*2);
+        ctx.fill();
+      } else if (t === T.GHOST_DOOR) {
+        ctx.fillStyle = '#ffb8ff';
+        ctx.fillRect(px+2, py+TILE/2-2, TILE-4, 4);
+      }
+    }
+  }
+}
+
+function drawGhost(g) {
+  const rx = g.renderX, ry = g.renderY;
+  const cx = rx + TILE/2, cy = ry + TILE/2 - 1;
+  const rad = TILE/2 - 2;
+
+  if (g.state === GS.HOUSE && g.exitTimer < g.exitDelay) return; // hidden in house
+
+  let bodyColor = g.color;
+  const frightFlash = g.state === GS.FRIGHTENED && g.frightenedTimer < FLASH_START;
+  if (g.state === GS.FRIGHTENED) {
+    bodyColor = frightFlash && Math.floor(lastFrameTime / 250) % 2 === 0 ? '#ffffff' : '#2020dd';
+  }
+
+  if (g.state === GS.EATEN) {
+    // just eyes
+    drawGhostEyes(ctx, cx, cy, '#ffffff', '#0000ee');
+    return;
+  }
+
+  ctx.fillStyle = bodyColor;
+  ctx.beginPath();
+  ctx.arc(cx, cy, rad, Math.PI, 0, false);
+  const boty = ry + TILE - 3;
+  ctx.lineTo(rx + TILE - 2, boty);
+  const sw = (TILE-4)/3;
+  ctx.quadraticCurveTo(rx+TILE-2-sw*0.5, boty+5, rx+TILE-2-sw*1, boty);
+  ctx.quadraticCurveTo(rx+TILE-2-sw*1.5, boty-5, rx+TILE-2-sw*2, boty);
+  ctx.quadraticCurveTo(rx+2+sw*0.5, boty+5, rx+2, boty);
+  ctx.lineTo(rx+2, cy);
+  ctx.closePath();
+  ctx.fill();
+
+  if (g.state === GS.FRIGHTENED) {
+    ctx.fillStyle = frightFlash && Math.floor(lastFrameTime/250)%2===0 ? '#0000aa' : '#ffffff';
+    ctx.fillRect(cx-6, cy-3, 3, 3);
+    ctx.fillRect(cx+3, cy-3, 3, 3);
+    ctx.strokeStyle = frightFlash && Math.floor(lastFrameTime/250)%2===0 ? '#0000aa' : '#ffffff';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(cx-7,cy+3); ctx.lineTo(cx-5,cy+1); ctx.lineTo(cx-3,cy+3);
+    ctx.lineTo(cx-1,cy+1); ctx.lineTo(cx+1,cy+3); ctx.lineTo(cx+3,cy+1);
+    ctx.lineTo(cx+5,cy+3); ctx.lineTo(cx+7,cy+1);
+    ctx.stroke();
+  } else {
+    drawGhostEyes(ctx, cx, cy, '#ffffff', '#0000ee');
+  }
+}
+
+function drawGhostEyes(ctx, cx, cy, white, pupil) {
+  const eyeOffX = 4, eyeOffY = -2, eyeRad = 3;
+  for (const ex of [cx-eyeOffX, cx+eyeOffX]) {
+    ctx.fillStyle = white;
+    ctx.beginPath(); ctx.arc(ex, cy+eyeOffY, eyeRad, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = pupil;
+    ctx.beginPath(); ctx.arc(ex+1, cy+eyeOffY, 1.5, 0, Math.PI*2); ctx.fill();
+  }
+}
+
+function drawSnakeBody() {
+  const len = snake.body.length;
+  for (let i = len-1; i >= 1; i--) {
+    const {x,y} = snake.body[i];
+    const t = i / len;
+    const brightness = Math.floor(255 - t*80);
+    ctx.fillStyle = `rgb(0,${Math.floor(brightness*0.5)},${brightness})`;
+    roundRect(ctx, x*TILE+2, y*TILE+2, TILE-4, TILE-4, 4);
+    ctx.fill();
+    if (i % 2 === 0) {
+      ctx.fillStyle = 'rgba(0,50,180,0.35)';
+      ctx.beginPath();
+      ctx.ellipse(x*TILE+TILE/2, y*TILE+TILE/2, TILE/2-4, TILE/4, 0, 0, Math.PI*2);
+      ctx.fill();
+    }
+  }
+}
+
+function drawCobraHead() {
+  const {x,y} = snake.body[0];
+  const px = x*TILE + TILE/2;
+  const py = y*TILE + TILE/2;
+  const angle = Math.atan2(snake.dir.y, snake.dir.x);
+  const hw = TILE/2 - 1, hh = TILE/2 - 1;
+
+  ctx.save();
+  ctx.translate(px, py);
+  ctx.rotate(angle);
+
+  // hood
+  ctx.fillStyle = '#0055dd';
+  ctx.beginPath();
+  ctx.ellipse(-hw*0.2, 0, hw*0.85, hh*1.35, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // head body
+  ctx.fillStyle = '#0099ff';
+  roundRect(ctx, -hw, -hh*0.75, hw*2, hh*1.5, 4);
+  ctx.fill();
+
+  // scales on head
+  ctx.fillStyle = 'rgba(0,50,180,0.3)';
+  ctx.beginPath();
+  ctx.ellipse(0, 0, hw*0.6, hh*0.4, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // eyes
+  for (const ey of [-hh*0.3, hh*0.3]) {
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath(); ctx.arc(hw*0.15, ey, 3.5, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#111111';
+    ctx.beginPath(); ctx.ellipse(hw*0.15, ey, 1.3, 3, 0, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.beginPath(); ctx.arc(hw*0.15+0.8, ey-1, 0.8, 0, Math.PI*2); ctx.fill();
+  }
+
+  // tongue
+  if (tongueVisible) {
+    ctx.strokeStyle = '#ff2222';
+    ctx.lineWidth = 1.5;
+    ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(hw, 0); ctx.lineTo(hw+7, 0); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(hw+7, 0); ctx.lineTo(hw+12, -3); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(hw+7, 0); ctx.lineTo(hw+12, 3); ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+function drawHUD() {
+  const y = ROWS * TILE;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, y, canvas.width, 50);
+
+  ctx.fillStyle = '#ffff00';
+  ctx.font = 'bold 14px monospace';
+  ctx.fillText(`SCORE: ${score}`, 8, y+20);
+  ctx.fillText(`LVL ${level}`, 8, y+38);
+
+  // lives as small cobra heads
+  ctx.fillStyle = '#00cc00';
+  ctx.font = 'bold 14px monospace';
+  ctx.fillText('LIVES:', canvas.width/2 - 40, y+20);
+  for (let i = 0; i < lives; i++) {
+    ctx.fillStyle = '#00cc00';
+    ctx.beginPath();
+    ctx.arc(canvas.width/2 + 30 + i*22, y+15, 7, 0, Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath(); ctx.arc(canvas.width/2+33+i*22, y+13, 2, 0, Math.PI*2); ctx.fill();
+  }
+}
+
+function drawOverlay(text, sub) {
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.fillRect(0, ROWS*TILE/2-40, canvas.width, 80);
+  ctx.fillStyle = '#ffff00';
+  ctx.font = 'bold 28px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(text, canvas.width/2, ROWS*TILE/2+5);
+  if (sub) {
+    ctx.font = '14px monospace';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(sub, canvas.width/2, ROWS*TILE/2+28);
+  }
+  ctx.textAlign = 'left';
+}
+
+function render(ts) {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  drawMaze();
+  for (const g of ghosts) {
+    // lerp render position
+    g.renderX += (g.x * TILE - g.renderX) * 0.35;
+    g.renderY += (g.y * TILE - g.renderY) * 0.35;
+    drawGhost(g);
+  }
+  drawSnakeBody();
+  drawCobraHead();
+  drawHUD();
+
+  if (gameState === STATE.READY) drawOverlay('READY!', 'Get the dots!');
+  if (gameState === STATE.DEAD)  drawOverlay('OUCH!', 'Get ready...');
+  if (gameState === STATE.WIN)   drawOverlay('YOU WIN!', `Score: ${score}  Press R to restart`);
+  if (gameState === STATE.GAME_OVER) drawOverlay('GAME OVER', `Score: ${score}  Press R to restart`);
+}
+
+// ─── MAIN LOOP ───────────────────────────────────────────────────────────────
+function gameLoop(ts) {
+  const dt = Math.min(ts - lastFrameTime, 100);
+  lastFrameTime = ts;
+
+  if (gameState === STATE.READY || gameState === STATE.DEAD) {
+    readyTimer -= dt;
+    if (readyTimer <= 0) gameState = STATE.PLAYING;
+  }
+
+  if (gameState === STATE.PLAYING) {
+    lastMoveTime += dt;
+    if (lastMoveTime >= MOVE_INTERVAL) {
+      lastMoveTime -= MOVE_INTERVAL;
+      gameTick(MOVE_INTERVAL);
+    }
+  }
+
+  render(ts);
+  requestAnimationFrame(gameLoop);
+}
+
+// ─── INPUT ───────────────────────────────────────────────────────────────────
+const KEY_MAP = {
+  ArrowUp:{x:0,y:-1}, ArrowDown:{x:0,y:1}, ArrowLeft:{x:-1,y:0}, ArrowRight:{x:1,y:0},
+  w:{x:0,y:-1}, s:{x:0,y:1}, a:{x:-1,y:0}, d:{x:1,y:0},
+  W:{x:0,y:-1}, S:{x:0,y:1}, A:{x:-1,y:0}, D:{x:1,y:0},
+};
+document.addEventListener('keydown', e => {
+  if ((e.key === 'r' || e.key === 'R') && (gameState === STATE.WIN || gameState === STATE.GAME_OVER)) {
+    initGame(); return;
+  }
+  const d = KEY_MAP[e.key];
+  if (d && gameState === STATE.PLAYING) {
+    if (snake.dirQueue.length < 2) snake.dirQueue.push(d);
+    e.preventDefault();
+  }
+});
+
+// ─── START ───────────────────────────────────────────────────────────────────
+initGame();
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
