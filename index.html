@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Cobra Pac-Man</title>
+<title>Cooley Pac-Cobra</title>
 <style>
   body { background: #000; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; font-family: monospace; }
   canvas { display: block; }
@@ -23,6 +23,12 @@ const FRIGHTEN_DURATION = 7000;
 const FLASH_START = 2000;
 const GHOST_HOUSE_ENTRY = { x: 13, y: 11 }; // tile above door
 const GHOST_RESPAWN = { x: 13, y: 14 };
+const PENGUIN_SPAWN_INTERVAL = 12000; // ms between penguin spawns
+const PENGUIN_MOVE_INTERVAL = 200;    // ms per penguin move step
+const SPRINT_INTERVAL = 88;           // ms per tick while sprinting
+const STAMINA_MAX = 100;
+const STAMINA_DRAIN = 42;             // per second while sprinting
+const STAMINA_REGEN = 15;             // per second while not sprinting
 
 // ─── MAZE TEMPLATE (28×31) ───────────────────────────────────────────────────
 // 0=wall 1=dot 2=power 3=empty 4=ghost_house 5=tunnel 6=ghost_door
@@ -74,6 +80,15 @@ let globalGhostTimer = 0;
 let scatterMode = true; // starts in scatter
 let ghostEatCombo = 0;
 let tongueVisible = true, tongueTimer = 0;
+let penguin = null;
+let penguinSpawnTimer = 8000; // first penguin after 8s
+let stamina = STAMINA_MAX;
+let sprintHeld = false;
+let sprintCooldown = 0;
+let ghostMoveTime = 0;
+const SPRINT_COOLDOWN_DURATION = 5000;
+let penguinPowerDisplay = 0;
+const PENGUIN_POWER_DURATION = 2500;
 
 const SCATTER_TIMES = [7000, 20000, 7000, 20000, 5000]; // alternating scatter/chase
 let scatterPhase = 0;
@@ -86,6 +101,9 @@ function resetSnake() {
     dir: {x:1,y:0},
     dirQueue: [],
     growing: 0,
+    phasing: false,
+    phaseTimer: 0,
+    phaseLinger: false,
   };
 }
 
@@ -119,6 +137,12 @@ function initGame() {
   scatterPhase = 0; scatterMode = true;
   globalGhostTimer = 0;
   ghostEatCombo = 0;
+  ghostMoveTime = 0;
+  penguin = null;
+  penguinSpawnTimer = 8000;
+  penguinPowerDisplay = 0;
+  stamina = STAMINA_MAX;
+  sprintHeld = false;
 }
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
@@ -152,6 +176,15 @@ function wrapX(x) {
   if (x < 0) return COLS - 1;
   if (x >= COLS) return 0;
   return x;
+}
+
+// ─── PHASE HELPER ────────────────────────────────────────────────────────────
+function snakeHeadInBody() {
+  const head = snake.body[0];
+  for (let i = 1; i < snake.body.length; i++) {
+    if (snake.body[i].x === head.x && snake.body[i].y === head.y) return true;
+  }
+  return false;
 }
 
 // ─── BFS ─────────────────────────────────────────────────────────────────────
@@ -272,22 +305,33 @@ function moveSnake() {
   // wall — just stop, don't die
   if (ny < 0 || ny >= ROWS || !tileWalkable(nx, ny, false, null)) return;
 
-  // self-collision (exclude tail tip if not growing)
-  const limit = snake.growing > 0 ? snake.body.length : snake.body.length - 1;
-  for (let i = 0; i < limit; i++) {
-    if (snake.body[i].x === nx && snake.body[i].y === ny) { loseLife(); return; }
+  // self-collision (exclude tail tip if not growing) — skipped while phasing
+  if (!snake.phasing) {
+    const limit = snake.growing > 0 ? snake.body.length : snake.body.length - 1;
+    for (let i = 0; i < limit; i++) {
+      if (snake.body[i].x === nx && snake.body[i].y === ny) { loseLife(); return; }
+    }
   }
 
   snake.body.unshift({x:nx, y:ny});
   if (snake.growing > 0) { snake.growing--; } else { snake.body.pop(); }
 
+  // linger check: timer expired but we were stuck in body — turn off phasing as soon as we're clear
+  if (snake.phaseLinger && !snakeHeadInBody()) {
+    snake.phasing = false;
+    snake.phaseLinger = false;
+  }
+
   // pickup
   const tile = maze[ny][nx];
   if (tile === T.DOT) {
-    maze[ny][nx] = T.EMPTY; score += 10; snake.growing++; dotsRemaining--;
+    maze[ny][nx] = T.EMPTY; score += 1; snake.growing++; dotsRemaining--;
     if (dotsRemaining === 0) { gameState = STATE.WIN; return; }
   } else if (tile === T.POWER) {
     maze[ny][nx] = T.EMPTY; score += 50; snake.growing++; dotsRemaining--;
+    snake.phasing = true;
+    snake.phaseTimer = FRIGHTEN_DURATION;
+    snake.phaseLinger = false;
     ghostEatCombo = 0;
     for (const g of ghosts) {
       if (g.state !== GS.HOUSE && g.state !== GS.EATEN) {
@@ -298,8 +342,9 @@ function moveSnake() {
     if (dotsRemaining === 0) { gameState = STATE.WIN; return; }
   }
 
-  // ghost collision after snake moves
+  // ghost and penguin collision after snake moves
   checkGhostCollision();
+  checkPenguinCollision();
 }
 
 function checkGhostCollision() {
@@ -317,19 +362,199 @@ function checkGhostCollision() {
   }
 }
 
+// ─── PENGUIN ─────────────────────────────────────────────────────────────────
+function spawnPenguin() {
+  const candidates = [];
+  for (let r = 1; r < ROWS - 1; r++) {
+    for (let c = 1; c < COLS - 1; c++) {
+      if (!tileWalkable(c, r, false, null)) continue;
+      if (snake.body.some(s => s.x === c && s.y === r)) continue;
+      candidates.push({x: c, y: r});
+    }
+  }
+  if (candidates.length === 0) return;
+  const pos = candidates[Math.floor(Math.random() * candidates.length)];
+  // always start with a diagonal velocity, like a pong ball
+  penguin = {
+    x: pos.x, y: pos.y,
+    dir: { x: Math.random() < 0.5 ? -1 : 1, y: Math.random() < 0.5 ? -1 : 1 },
+    moveTimer: PENGUIN_MOVE_INTERVAL,
+  };
+}
+
+function movePenguin(dt) {
+  if (!penguin) return;
+  penguin.moveTimer -= dt;
+  if (penguin.moveTimer > 0) return;
+  penguin.moveTimer = PENGUIN_MOVE_INTERVAL;
+
+  const { x, y, dir } = penguin;
+  const nx = wrapX(x + dir.x);
+  const ny = y + dir.y;
+
+  const diagOk = ny >= 0 && ny < ROWS && tileWalkable(nx, ny, false, null);
+  const xOk    = tileWalkable(wrapX(x + dir.x), y, false, null);
+  const yOk    = ny >= 0 && ny < ROWS && tileWalkable(x, ny, false, null);
+
+  if (diagOk) {
+    // open diagonal — move straight like a pong ball
+    penguin.x = nx;
+    penguin.y = ny;
+  } else if (xOk && !yOk) {
+    // wall in y axis — reflect y, slide along x
+    penguin.dir.y = -dir.y;
+    penguin.x = wrapX(x + dir.x);
+  } else if (yOk && !xOk) {
+    // wall in x axis — reflect x, slide along y
+    penguin.dir.x = -dir.x;
+    penguin.y = ny;
+  } else {
+    // corner — reflect both and step in new direction
+    penguin.dir.x = -dir.x;
+    penguin.dir.y = -dir.y;
+    const rnx = wrapX(x + penguin.dir.x);
+    const rny = y + penguin.dir.y;
+    if (rny >= 0 && rny < ROWS && tileWalkable(rnx, rny, false, null)) {
+      penguin.x = rnx;
+      penguin.y = rny;
+    }
+  }
+}
+
+function checkPenguinCollision() {
+  if (!penguin) return;
+  const head = snake.body[0];
+  if (head.x !== penguin.x || head.y !== penguin.y) return;
+  score += 50;
+  snake.body = snake.body.slice(0, 3);
+  snake.growing = 0;
+  penguin = null;
+  penguinSpawnTimer = PENGUIN_SPAWN_INTERVAL;
+  penguinPowerDisplay = PENGUIN_POWER_DURATION;
+}
+
+function drawPenguin() {
+  if (!penguin) return;
+  const px = penguin.x * TILE + TILE / 2;
+  const py = penguin.y * TILE + TILE / 2;
+  const s = TILE / 2 + 1;  // fills most of the tile
+
+  // pulsing glow — radius matches the penguin's outer silhouette
+  const glowR = s * 0.95;
+  const glow = 0.3 + 0.2 * Math.sin(lastFrameTime / 350);
+  ctx.globalAlpha = glow;
+  ctx.fillStyle = '#00eeff';
+  ctx.beginPath(); ctx.arc(px, py, glowR, 0, Math.PI * 2); ctx.fill();
+  ctx.globalAlpha = 1;
+
+  ctx.save();
+  ctx.translate(px, py);
+  ctx.rotate(Math.sin(lastFrameTime / 220) * 0.18);
+
+  // fluffy round body — gray-brown baby down, nearly circular (not sleek adult oval)
+  ctx.fillStyle = '#5a5a6a';
+  ctx.beginPath();
+  ctx.ellipse(0, s * 0.18, s * 0.72, s * 0.72, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // oversized head — merges with body, no visible neck
+  ctx.fillStyle = '#5a5a6a';
+  ctx.beginPath();
+  ctx.arc(0, -s * 0.22, s * 0.62, 0, Math.PI * 2);
+  ctx.fill();
+
+  // large white face patch covering most of the front
+  ctx.fillStyle = '#f0f0ee';
+  ctx.beginPath();
+  ctx.ellipse(0, -s * 0.05, s * 0.46, s * 0.62, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // tiny stubby wing nubs on sides
+  ctx.fillStyle = '#484858';
+  for (const side of [-1, 1]) {
+    ctx.beginPath();
+    ctx.ellipse(side * s * 0.68, s * 0.15, s * 0.18, s * 0.28, side * 0.35, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // huge baby eyes — dominant feature, takes up a lot of the face
+  for (const ex of [-s * 0.21, s * 0.21]) {
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath(); ctx.arc(ex, -s * 0.28, s * 0.26, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#111122';
+    ctx.beginPath(); ctx.arc(ex + s * 0.04, -s * 0.26, s * 0.17, 0, Math.PI * 2); ctx.fill();
+    // big sparkle highlight
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath(); ctx.arc(ex + s * 0.08, -s * 0.33, s * 0.08, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // tiny stubby beak — just a small nub
+  ctx.fillStyle = '#ffaa00';
+  ctx.beginPath();
+  ctx.moveTo(0, -s * 0.1);
+  ctx.lineTo(-s * 0.08, -s * 0.03);
+  ctx.lineTo(s * 0.08, -s * 0.03);
+  ctx.closePath(); ctx.fill();
+
+  // tiny feet
+  ctx.fillStyle = '#ffaa00';
+  for (const fx of [-s * 0.2, s * 0.2]) {
+    ctx.beginPath();
+    ctx.ellipse(fx, s * 0.84, s * 0.16, s * 0.09, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.restore();
+}
+
 // ─── LIFE MANAGEMENT ─────────────────────────────────────────────────────────
 function loseLife() {
   lives--;
   if (lives <= 0) { gameState = STATE.GAME_OVER; return; }
   gameState = STATE.DEAD;
   readyTimer = 1500;
+  stamina = STAMINA_MAX;
+  sprintHeld = false;
+  sprintCooldown = 0;
+  ghostMoveTime = 0;
   resetSnake();
   resetGhosts();
 }
 
 // ─── GAME TICK ───────────────────────────────────────────────────────────────
+// Snake tick — runs at sprint speed when dashing
 function gameTick(dt) {
-  // update scatter/chase cycle
+  // tongue flicker
+  tongueTimer += dt;
+  if (tongueTimer > 400) { tongueTimer = 0; tongueVisible = !tongueVisible; }
+
+  // phase timer countdown
+  if (snake.phaseTimer > 0) {
+    snake.phaseTimer -= dt;
+    if (snake.phaseTimer <= 0) {
+      snake.phaseTimer = 0;
+      if (!snakeHeadInBody()) {
+        snake.phasing = false;
+        snake.phaseLinger = false;
+      } else {
+        snake.phaseLinger = true;
+      }
+    }
+  }
+
+  // penguin spawn timer
+  if (!penguin) {
+    penguinSpawnTimer -= dt;
+    if (penguinSpawnTimer <= 0) { spawnPenguin(); penguinSpawnTimer = PENGUIN_SPAWN_INTERVAL; }
+  }
+  movePenguin(dt);
+
+  moveSnake();
+}
+
+// Ghost tick — always runs at MOVE_INTERVAL, unaffected by sprint
+function ghostTick(dt) {
+  // scatter/chase cycle
   globalGhostTimer += dt;
   if (scatterPhase < SCATTER_TIMES.length) {
     if (globalGhostTimer >= SCATTER_TIMES[scatterPhase]) {
@@ -347,13 +572,6 @@ function gameTick(dt) {
       }
     }
   }
-
-  // tongue flicker
-  tongueTimer += dt;
-  if (tongueTimer > 400) { tongueTimer = 0; tongueVisible = !tongueVisible; }
-
-  moveSnake();
-  if (gameState !== STATE.PLAYING) return;
   for (const g of ghosts) moveGhost(g, dt);
   checkGhostCollision();
 }
@@ -448,15 +666,25 @@ function drawGhostEyes(ctx, cx, cy, white, pupil) {
 
 function drawSnakeBody() {
   const len = snake.body.length;
+  const isPhasing = snake.phasing;
   for (let i = len-1; i >= 1; i--) {
     const {x,y} = snake.body[i];
     const t = i / len;
     const brightness = Math.floor(255 - t*80);
-    ctx.fillStyle = `rgb(0,${Math.floor(brightness*0.5)},${brightness})`;
-    roundRect(ctx, x*TILE+2, y*TILE+2, TILE-4, TILE-4, 4);
-    ctx.fill();
+    if (isPhasing) {
+      const pulse = 0.4 + 0.35 * Math.sin(lastFrameTime / 180 + i * 0.4);
+      ctx.globalAlpha = pulse;
+      ctx.fillStyle = `rgb(${Math.floor(brightness*0.75)},0,${brightness})`;
+      roundRect(ctx, x*TILE+2, y*TILE+2, TILE-4, TILE-4, 4);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    } else {
+      ctx.fillStyle = `rgb(0,${Math.floor(brightness*0.5)},${brightness})`;
+      roundRect(ctx, x*TILE+2, y*TILE+2, TILE-4, TILE-4, 4);
+      ctx.fill();
+    }
     if (i % 2 === 0) {
-      ctx.fillStyle = 'rgba(0,50,180,0.35)';
+      ctx.fillStyle = isPhasing ? 'rgba(180,0,200,0.3)' : 'rgba(0,50,180,0.35)';
       ctx.beginPath();
       ctx.ellipse(x*TILE+TILE/2, y*TILE+TILE/2, TILE/2-4, TILE/4, 0, 0, Math.PI*2);
       ctx.fill();
@@ -475,14 +703,25 @@ function drawCobraHead() {
   ctx.translate(px, py);
   ctx.rotate(angle);
 
+  // phasing aura
+  if (snake.phasing) {
+    const aura = 0.3 + 0.3 * Math.sin(lastFrameTime / 150);
+    ctx.globalAlpha = aura;
+    ctx.fillStyle = '#dd00ff';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, hw + 6, hh + 6, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
   // hood
-  ctx.fillStyle = '#0055dd';
+  ctx.fillStyle = snake.phasing ? '#5500dd' : '#0055dd';
   ctx.beginPath();
   ctx.ellipse(-hw*0.2, 0, hw*0.85, hh*1.35, 0, 0, Math.PI*2);
   ctx.fill();
 
   // head body
-  ctx.fillStyle = '#0099ff';
+  ctx.fillStyle = snake.phasing ? '#9900ff' : '#0099ff';
   roundRect(ctx, -hw, -hh*0.75, hw*2, hh*1.5, 4);
   ctx.fill();
 
@@ -525,6 +764,35 @@ function drawHUD() {
   ctx.fillText(`SCORE: ${score}`, 8, y+20);
   ctx.fillText(`LVL ${level}`, 8, y+38);
 
+  // phase indicator
+  if (snake.phasing) {
+    const pulse = Math.floor(lastFrameTime / 300) % 2 === 0;
+    ctx.fillStyle = pulse ? '#ff00ff' : '#cc00cc';
+    ctx.font = 'bold 14px monospace';
+    const label = snake.phaseLinger ? 'PHASE: EXIT BODY' : `PHASE: ${(snake.phaseTimer / 1000).toFixed(1)}s`;
+    ctx.fillText(label, canvas.width - 180, y + 20);
+  }
+
+  // stamina bar (bottom right)
+  const barW = 100, barH = 10;
+  const barX = canvas.width - barW - 10;
+  const barY = y + 30;
+  ctx.fillStyle = '#222';
+  ctx.fillRect(barX, barY, barW, barH);
+  const fill = (stamina / STAMINA_MAX) * barW;
+  const onCooldown = sprintCooldown > 0;
+  ctx.fillStyle = onCooldown ? '#444455' : stamina > 60 ? '#00ff55' : stamina > 25 ? '#ffaa00' : '#ff3300';
+  ctx.fillRect(barX, barY, fill, barH);
+  ctx.strokeStyle = onCooldown ? '#ff3300' : '#555';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(barX, barY, barW, barH);
+  const sprinting = sprintHeld && stamina > 0 && !onCooldown;
+  ctx.fillStyle = onCooldown ? '#ff5555' : sprinting ? '#ffffff' : '#aaaaaa';
+  ctx.font = (sprinting ? 'bold ' : '') + '11px monospace';
+  ctx.textAlign = 'right';
+  ctx.fillText(onCooldown ? `WAIT ${Math.ceil(sprintCooldown / 1000)}s` : 'STAMINA', barX - 4, barY + 9);
+  ctx.textAlign = 'left';
+
   // lives as small cobra heads
   ctx.fillStyle = '#00cc00';
   ctx.font = 'bold 14px monospace';
@@ -565,9 +833,28 @@ function render(ts) {
     g.renderY += (g.y * TILE - g.renderY) * 0.35;
     drawGhost(g);
   }
+  drawPenguin();
   drawSnakeBody();
   drawCobraHead();
   drawHUD();
+
+  if (penguinPowerDisplay > 0) {
+    const progress = penguinPowerDisplay / PENGUIN_POWER_DURATION;
+    const shakeAmt = 7 * progress;
+    const sx = (Math.random() - 0.5) * shakeAmt;
+    const sy = (Math.random() - 0.5) * shakeAmt;
+    const cx = canvas.width / 2 + sx;
+    const cy = 44 + sy;
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 30px monospace';
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 5;
+    ctx.strokeText('PENGUIN POWER!', cx, cy);
+    ctx.fillStyle = '#00eeff';
+    ctx.fillText('PENGUIN POWER!', cx, cy);
+    ctx.restore();
+  }
 
   if (gameState === STATE.READY) drawOverlay('READY!', 'Get the dots!');
   if (gameState === STATE.DEAD)  drawOverlay('OUCH!', 'Get ready...');
@@ -579,6 +866,7 @@ function render(ts) {
 function gameLoop(ts) {
   const dt = Math.min(ts - lastFrameTime, 100);
   lastFrameTime = ts;
+  if (penguinPowerDisplay > 0) penguinPowerDisplay -= dt;
 
   if (gameState === STATE.READY || gameState === STATE.DEAD) {
     readyTimer -= dt;
@@ -586,10 +874,29 @@ function gameLoop(ts) {
   }
 
   if (gameState === STATE.PLAYING) {
+    if (sprintCooldown > 0) sprintCooldown -= dt;
+    const activeSprint = sprintHeld && stamina > 0 && sprintCooldown <= 0;
+    if (activeSprint) {
+      const prev = stamina;
+      stamina = Math.max(0, stamina - STAMINA_DRAIN * dt / 1000);
+      if (stamina === 0 && prev > 0) sprintCooldown = SPRINT_COOLDOWN_DURATION;
+    } else {
+      stamina = Math.min(STAMINA_MAX, stamina + STAMINA_REGEN * dt / 1000);
+    }
+
+    // snake moves at sprint speed when dashing
+    const snakeInterval = activeSprint ? SPRINT_INTERVAL : MOVE_INTERVAL;
     lastMoveTime += dt;
-    if (lastMoveTime >= MOVE_INTERVAL) {
-      lastMoveTime -= MOVE_INTERVAL;
-      gameTick(MOVE_INTERVAL);
+    if (lastMoveTime >= snakeInterval) {
+      lastMoveTime -= snakeInterval;
+      gameTick(snakeInterval);
+    }
+
+    // ghosts always move at the base interval, unaffected by sprint
+    ghostMoveTime += dt;
+    if (ghostMoveTime >= MOVE_INTERVAL) {
+      ghostMoveTime -= MOVE_INTERVAL;
+      if (gameState === STATE.PLAYING) ghostTick(MOVE_INTERVAL);
     }
   }
 
@@ -607,11 +914,15 @@ document.addEventListener('keydown', e => {
   if ((e.key === 'r' || e.key === 'R') && (gameState === STATE.WIN || gameState === STATE.GAME_OVER)) {
     initGame(); return;
   }
+  if (e.code === 'Space') { sprintHeld = true; e.preventDefault(); return; }
   const d = KEY_MAP[e.key];
   if (d && gameState === STATE.PLAYING) {
     if (snake.dirQueue.length < 2) snake.dirQueue.push(d);
     e.preventDefault();
   }
+});
+document.addEventListener('keyup', e => {
+  if (e.code === 'Space') { sprintHeld = false; e.preventDefault(); }
 });
 
 // ─── START ───────────────────────────────────────────────────────────────────
